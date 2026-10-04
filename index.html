@@ -102,7 +102,8 @@ footer a{color:var(--accent)}
 <a href="#ch3" data-target="ch3"><span class="num">03</span>一个字的三条路</a>
 <a href="#ch4" data-target="ch4"><span class="num">04</span>重试不是新步骤</a>
 <a href="#ch5" data-target="ch5"><span class="num">05</span>停下来之后</a>
-<a href="#ch6" data-target="ch6"><span class="num">06</span>从字节到消息</a></nav>
+<a href="#ch6" data-target="ch6"><span class="num">06</span>从字节到消息</a>
+<a href="#ch7" data-target="ch7"><span class="num">07</span>PTC：同一个问题的另一种答案</a></nav>
   <div class="sidebar-foot">
     <a href="https://github.com/webaifei/dsh-agent-loop-notes">源码仓库</a><br>
     对照 <a href="https://github.com/deepseek-ai/deepseek-harness">deepseek-harness</a>
@@ -115,8 +116,8 @@ footer a{color:var(--accent)}
     <h1>一个 agent loop<br>就是反复问「还有活吗」</h1>
     <p>DeepSeek Harness 的 agent runtime 有 893 行。 但它的骨架只有三层 <code>while</code>。</p>
     <div class="stats">
-      <span><b>6</b> 章</span>
-      <span><b>9</b> 个可运行文件</span>
+      <span><b>7</b> 章</span>
+      <span><b>10</b> 个可运行文件</span>
       <span>对照 <b>agent.ts</b> 的 893 行</span>
     </div>
     <div class="loops">
@@ -546,6 +547,70 @@ footer a{color:var(--accent)}
 <p>你打开 <code>agent.ts</code>，第一反应应该不再是&quot;从第一行开始读&quot;。</p>
 <p>而是<strong>先找那三个 <code>while</code></strong>——找到 <code>252</code>、<code>296</code>、<code>398</code>，然后看每一层的出口条件在等什么。</p>
 <p>找到了这个骨架，那 893 行的其余部分就都有了位置。它们不是 893 行逻辑，是三层循环的注脚。</p>
+
+</section>
+
+<section id="ch7" class="chapter">
+  <div class="chapter-head">
+    <span class="chapter-index">07</span>
+    <h2>PTC：同一个问题的另一种答案</h2>
+  </div>
+  <blockquote>
+<p><strong>代码</strong>：<code>code/step8-ptc.mjs</code><br><strong>对照</strong>：<code>packages/ptc-runtime/ptc-runtime/src/types.ts</code>、<code>packages/core/tools/src/ptc.ts</code></p>
+</blockquote>
+<h2>我原以为工具越多，模型越强</h2>
+<p>一个 agent 有 20 个工具，听起来比有 5 个的强。所以看到 DSH 在 PTC 模式下<strong>只给模型一个工具</strong>的时候，我的第一反应是&quot;这不是把能力砍了吗&quot;。</p>
+<p>砍掉的是直接调用，不是能力。所有工具仍然可用——<strong>只是必须从程序里调</strong>。</p>
+<p>DSH 对模型的原文写得很直白：</p>
+<blockquote>
+<p><code>run_code</code> 是唯一你能直接调用的工具——指名任何其他工具的调用都会失败。所有工具都要从程序里面调用。</p>
+</blockquote>
+<h2>省下来的不是能力，是上下文</h2>
+<p>这一刀砍下去，最大的收益在<strong>提示词</strong>里。</p>
+<p>原本每个工具都要写进模型上下文：名字、描述、参数 schema。20 个工具就是 20 份 schema，而且每次请求都要带。</p>
+<p>PTC 模式下只剩一个 <code>run_code</code> 的 schema。其余工具以<strong>生成的 SDK 类型声明</strong>的形式出现——不是给模型&quot;看&quot;的说明文档，而是它写程序时依赖的类型信息。</p>
+<p><strong>工具显不暴露给模型，是一件成本决策，不是能力决策。</strong></p>
+<p>当然，代价是模型得会写代码。但对现在的模型来说，写一段 <code>await tools.grep(...)</code> 比读 20 份 JSON Schema 更接近它的训练分布。</p>
+<h2>三个和 Codex 不同的选择</h2>
+<p>同一件事——让模型写程序调工具——Codex 和 DSH 给出了不同的工程答案。对照着看最清楚。</p>
+<h3>选择一：程序一次跑完，不挂起</h3>
+<p>Codex 的 cell 可以挂起（<code>Pending</code> + <code>WaitRequest</code>），DSH 的程序从开始跑到结束。</p>
+<p>这不是能力差异，是<strong>执行环境的差异</strong>推出来的：</p>
+<ul>
+<li>Codex 的 code mode 跑在<strong>内嵌 V8</strong> 里，起一个执行环境几乎免费，所以可以随时挂起、恢复</li>
+<li>DSH 的 PTC 跑在<strong>独立进程</strong>里（Node 或 CPython），启动成本高，所以一次跑完</li>
+</ul>
+<p>独立进程换来的是<strong>真正的操作系统级隔离</strong>——Landlock、Seatbelt、bwrap 这些沙箱能作用在它身上。同一个进程里的 V8 隔离给不了这个。</p>
+<p><strong>要隔离强度，还是要不要挂起的能力，这是二选一。</strong></p>
+<h3>选择二：状态不保留</h3>
+<p>DSH 的运行时契约里有一句话：<strong>每次运行都不会保留之前程序的状态。</strong></p>
+<p><code>code/step8-ptc.mjs</code> 的最后一个场景把这件事跑出来了：</p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>【场景 E · 两次运行之间状态不保留】</span></span>
+<span class="line"><span>  failure.kind = 'exception'</span></span>
+<span class="line"><span>  failure.message = remembered is not defined</span></span></code></pre></figure><p>第一次运行里 <code>const remembered = 42</code>，第二次运行读不到。</p>
+<p>这个设计是上一条的直接推论：既然每次都要起新进程，那就没有地方留状态。<strong>与其假装有个&quot;会话变量&quot;，不如明说没有</strong>——模型也就不会去依赖它。</p>
+<p>要跨运行共享，得靠别的机制（文件、或者宿主自己的状态），而不是上一段程序留下的内存。</p>
+<h3>选择三：失败是字段，不是异常</h3>
+<figure class="code"><figcaption>js</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#CB7676">const</span><span style="color:#BD976A"> outcome</span><span style="color:#666666"> =</span><span style="color:#4D9375"> await</span><span style="color:#BD976A"> runtime</span><span style="color:#666666">.</span><span style="color:#80A665">run</span><span style="color:#666666">({</span><span style="color:#BD976A"> program</span><span style="color:#666666">,</span><span style="color:#BD976A"> bindingNames</span><span style="color:#666666"> })</span></span>
+<span class="line"><span style="color:#4D9375">if</span><span style="color:#666666"> (</span><span style="color:#BD976A">outcome</span><span style="color:#666666">.</span><span style="color:#BD976A">failure</span><span style="color:#666666">)</span><span style="color:#666666"> {</span><span style="color:#758575DD"> /* 看 kind */</span><span style="color:#666666"> }</span></span></code></pre></figure><p><code>run()</code> <strong>永远不会因为程序失败而 reject</strong>。失败是 <code>PtcRunResult</code> 上的一个字段。</p>
+<p>八种 <code>kind</code>，契约里明确说它们是<strong>正交的</strong>：</p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>'exception'           程序抛错或语法错误</span></span>
+<span class="line"><span>'timeout'             执行预算用完</span></span>
+<span class="line"><span>'abort'               调用方的 signal 触发了</span></span>
+<span class="line"><span>'worker-exit'         执行基底死了（比如 OOM）</span></span>
+<span class="line"><span>'invalid-output'      完成值不是无损 JSON</span></span>
+<span class="line"><span>'output-limit'        日志/值/诊断超过上限</span></span>
+<span class="line"><span>'protocol'            程序发了非法或超预算的控制流量</span></span>
+<span class="line"><span>'sandbox-unavailable'  要求的隔离建立不起来</span></span></code></pre></figure><p>注释里特意强调：<strong>预算到期不是异常，中止不是超时，基底死亡两者都不是。</strong></p>
+<p>这个区分不是为了好看。写了 <code>catch (e)</code> 的处理逻辑，在这三种情况下该做的事完全不同——超时可以重试，中止要保留已有结果，基底死亡要重建执行环境。把它们压成一个 <code>catch</code>，信息就丢了。</p>
+<h2>边界上的几处谨慎</h2>
+<p>读 <code>types.ts</code> 的时候，有几处细节能看出这套东西被认真推敲过：</p>
+<p><strong>绑定参数必须是无损 JSON。</strong> 跨进程序列化会丢信息，所以运行时宁可<strong>拒绝这次运行</strong>，也不悄悄传过去一个被削过的值。</p>
+<p><strong>命名空间的全局名要语言可移植。</strong> 规则是 <code>[A-Za-z_][A-Za-z0-9_]*</code> 且不能是各语言的保留字——因为同一份绑定清单要能同时喂给 TypeScript 和 Python 后端，<code>$tools</code> 这种只有 JS 认的写法在设计上就被拒了。</p>
+<p><strong><code>console</code>、<code>__dsh_main__</code> 这类名字被预留。</strong> 它们在每个后端里都是运行时自己的槽位，不能被绑定占用。</p>
+<p>这些规则单看都琐碎。合起来说明一件事：<strong>这个 seam 的设计目标是&quot;换后端不改调用方&quot;</strong>，所以任何后端特有的东西都不能泄漏到接口上。</p>
+<hr>
+<p>下次再看到&quot;给模型加工具&quot;，除了问&quot;这个工具给谁调&quot;，再问一句：<strong>它需要跨调用保持状态吗？</strong> 需要的话，你就得在处理&quot;状态存在哪、活多久、谁能看到&quot;上花掉不少设计预算。</p>
 
 </section></article>
 </main>

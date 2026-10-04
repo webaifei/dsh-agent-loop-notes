@@ -190,8 +190,8 @@ footer a{color:var(--accent)}
     <h1>一个 agent loop<br>就是反复问「还有活吗」</h1>
     <p>${lede}</p>
     <div class="stats">
-      <span><b>6</b> 章</span>
-      <span><b>9</b> 个可运行文件</span>
+      <span><b>7</b> 章</span>
+      <span><b>10</b> 个可运行文件</span>
       <span>对照 <b>agent.ts</b> 的 893 行</span>
     </div>
     <div class="loops">

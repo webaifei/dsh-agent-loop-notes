@@ -40,6 +40,7 @@ node code/step1.mjs
 | [四、重试不是新步骤](ch04-重试不是新步骤.md) | `step5` |
 | [五、停下来之后](ch05-停下来之后.md) | `step6` |
 | [六、从字节到消息](ch06-从字节到消息.md) | `step7` |
+| [七、PTC：同一个问题的另一种答案](ch07-PTC-同一个问题的另一种答案.md) | `step8-ptc` | run_code 是唯一工具；失败是字段；状态不保留 |
 
 对照组是真实的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)，每章末尾都会指到具体文件和行号。
 
