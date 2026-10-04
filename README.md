@@ -43,6 +43,17 @@ node code/step1.mjs
 
 对照组是真实的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)，每章末尾都会指到具体文件和行号。
 
+## 网页版
+
+[`index.html`](index.html) 是这些章节的单文件网页版——侧边导航、阅读进度、代码高亮。双击就能打开，不依赖任何东西。
+
+改完 Markdown 之后重新生成：
+
+```sh
+npm i -D marked shiki
+node tools/build-page.mjs
+```
+
 ## 最后
 
 写完这九个文件之后，你打开 `agent.ts` 的第一反应会变成：**先找那三个 `while`**。

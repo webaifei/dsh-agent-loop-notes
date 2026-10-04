@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>一个 agent loop，就是反复问「还有活吗」</title>
+<meta name="description" content="从零写一遍 DeepSeek Harness 的 agent loop：三层循环、两条队列、一个 chunk 的三条路。">
+<style>
+:root{
+  --bg:#fbfaf7; --panel:#fff; --fg:#191817; --muted:#6d6a63; --line:#e7e3da;
+  --accent:#b45309; --accent-soft:#fdf3e3;
+  --sidebar:264px; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{ --bg:#141413; --panel:#1b1b19; --fg:#ecebe7; --muted:#96938b; --line:#2c2b28;
+         --accent:#f0a45b; --accent-soft:#241d13; }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:16px/1.85 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased}
+
+.progress{position:fixed;top:0;left:0;right:0;height:2px;z-index:50;background:transparent}
+.progress i{display:block;height:100%;width:0;background:var(--accent);transition:width .1s linear}
+
+aside{position:fixed;top:0;bottom:0;left:0;width:var(--sidebar);padding:32px 20px 40px;
+  border-right:1px solid var(--line);overflow-y:auto;background:var(--panel)}
+.brand{font-size:13px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase;margin-bottom:6px}
+.brand-title{font-size:15px;font-weight:600;line-height:1.5;margin:0 0 24px;color:var(--fg)}
+aside nav{display:flex;flex-direction:column;gap:2px}
+aside nav a{display:flex;gap:10px;align-items:baseline;padding:8px 10px;border-radius:7px;
+  color:var(--muted);text-decoration:none;font-size:14px;line-height:1.5;transition:.15s}
+aside nav a:hover{background:var(--accent-soft);color:var(--fg)}
+aside nav a.active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+aside nav .num{font:11px/1 var(--mono);opacity:.55}
+.sidebar-foot{margin-top:28px;padding-top:18px;border-top:1px solid var(--line);
+  font-size:12px;color:var(--muted);line-height:1.8}
+.sidebar-foot a{color:var(--muted)}
+
+main{margin-left:var(--sidebar);padding:0 56px 140px;max-width:900px}
+
+.hero{padding:88px 0 40px;border-bottom:1px solid var(--line)}
+.hero .kicker{font:12px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--accent);margin-bottom:18px}
+.hero h1{font-size:40px;line-height:1.35;margin:0 0 20px;letter-spacing:-.01em}
+.hero p{font-size:17px;color:var(--muted);margin:0 0 28px;max-width:640px}
+.stats{display:flex;gap:28px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+.stats b{color:var(--fg);font-weight:600}
+
+.loops{margin:36px 0 0;font:12px/1.7 var(--mono);color:var(--muted)}
+.loops .l1{border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:12px 16px}
+.loops .l2{border:1px solid var(--line);border-left:3px solid var(--muted);border-radius:8px;padding:12px 16px;margin:8px 0 8px 16px}
+.loops .l3{border:1px solid var(--line);border-left:3px solid var(--line);border-radius:8px;padding:12px 16px;margin:8px 0 0 16px}
+.loops em{font-style:normal;color:var(--fg)}
+
+.chapter{padding:52px 0 8px;scroll-margin-top:24px}
+.chapter-head{display:flex;align-items:baseline;gap:14px;margin-bottom:8px}
+.chapter-index{font:13px/1 var(--mono);color:var(--accent);padding-top:6px}
+.chapter-head h2{font-size:27px;margin:0;letter-spacing:-.01em}
+
+article h2{font-size:21px;margin:44px 0 14px;padding-top:8px}
+article h3{font-size:17px;margin:32px 0 10px;color:var(--fg)}
+article p{margin:0 0 18px}
+article strong{font-weight:600}
+article a{color:var(--accent)}
+article ul,article ol{padding-left:22px;margin:0 0 18px}
+article li{margin:6px 0}
+article blockquote{margin:0 0 22px;padding:12px 18px;border-left:3px solid var(--accent);
+  background:var(--accent-soft);border-radius:0 7px 7px 0;font-size:14px;color:var(--muted)}
+article blockquote p{margin:0}
+article hr{border:0;border-top:1px solid var(--line);margin:40px 0}
+article table{width:100%;border-collapse:collapse;margin:0 0 22px;font-size:14px}
+article th,article td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}
+article th{color:var(--muted);font-weight:600;font-size:12px;letter-spacing:.04em;text-transform:uppercase}
+article code{font:13px/1.5 var(--mono);background:var(--accent-soft);padding:2px 6px;border-radius:5px}
+.code{margin:0 0 24px;border-radius:10px;overflow:hidden;background:#1b1b1f}
+.code figcaption{font:11px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;
+  color:#8b8b93;padding:10px 16px;border-bottom:1px solid #2a2a30}
+.code pre{margin:0;padding:18px 16px;overflow-x:auto}
+.code code{font:13px/1.75 var(--mono);background:none;padding:0}
+.code .shiki{background:#1b1b1f !important}
+
+footer{margin-left:var(--sidebar);padding:40px 56px 90px;border-top:1px solid var(--line);
+  font-size:13px;color:var(--muted);max-width:900px}
+footer a{color:var(--accent)}
+
+@media (max-width:900px){
+  aside{position:static;width:auto;border-right:0;border-bottom:1px solid var(--line);padding:20px}
+  main,footer{margin-left:0;padding-left:22px;padding-right:22px}
+  .hero{padding-top:48px}.hero h1{font-size:29px}
+}
+</style>
+</head>
+<body>
+<div class="progress"><i id="bar"></i></div>
+
+<aside>
+  <div class="brand">DeepSeek Harness</div>
+  <p class="brand-title">一个 agent loop<br>就是反复问「还有活吗」</p>
+  <nav><a href="#ch1" data-target="ch1"><span class="num">01</span>三次"还有活吗"</a>
+<a href="#ch2" data-target="ch2"><span class="num">02</span>两条队列</a>
+<a href="#ch3" data-target="ch3"><span class="num">03</span>一个字的三条路</a>
+<a href="#ch4" data-target="ch4"><span class="num">04</span>重试不是新步骤</a>
+<a href="#ch5" data-target="ch5"><span class="num">05</span>停下来之后</a>
+<a href="#ch6" data-target="ch6"><span class="num">06</span>从字节到消息</a></nav>
+  <div class="sidebar-foot">
+    <a href="https://github.com/webaifei/dsh-agent-loop-notes">源码仓库</a><br>
+    对照 <a href="https://github.com/deepseek-ai/deepseek-harness">deepseek-harness</a>
+  </div>
+</aside>
+
+<main>
+  <header class="hero">
+    <div class="kicker">从零写一遍</div>
+    <h1>一个 agent loop<br>就是反复问「还有活吗」</h1>
+    <p>DeepSeek Harness 的 agent runtime 有 893 行。 但它的骨架只有三层 <code>while</code>。</p>
+    <div class="stats">
+      <span><b>6</b> 章</span>
+      <span><b>9</b> 个可运行文件</span>
+      <span>对照 <b>agent.ts</b> 的 893 行</span>
+    </div>
+    <div class="loops">
+      <div class="l1">kick() <em>—— 还有轮次吗</em>
+        <div class="l2">turn() <em>—— 还欠请求吗</em>
+          <div class="l3">step() <em>—— 这次成了吗</em></div>
+        </div>
+      </div>
+    </div>
+  </header>
+  <article>
+<section id="ch1" class="chapter">
+  <div class="chapter-head">
+    <span class="chapter-index">01</span>
+    <h2>三次"还有活吗"</h2>
+  </div>
+  <blockquote>
+<p><strong>代码</strong>：<code>code/step1.mjs</code> <code>code/step2.mjs</code><br><strong>对照</strong>：<code>packages/core/agent-loop/src/agent.ts:252</code>（第一层）、<code>:296-396</code>（第二层）</p>
+</blockquote>
+<h2>先看一家小饭馆</h2>
+<p>一桌客人点了三道菜。</p>
+<p>后厨不会&quot;把三道菜一起做完&quot;。它的做法是：做第一道，端出去，回头问一句&quot;还有菜吗&quot;；有，做第二道；再问；做第三道；再问；没有了，收工。</p>
+<p>循环条件就一句话：<strong>还有菜吗。</strong></p>
+<p>但做一道菜本身也不是一件事。红烧肉要焯水、上色、焖。每做完一步都要看一眼：<strong>这一步够了吗？</strong> 不够就再焖一会儿，够了就进下一步。</p>
+<p>这里有件事值得停一下：</p>
+<ul>
+<li>外层问的是&quot;<strong>还有没有新的活</strong>&quot;</li>
+<li>内层问的是&quot;<strong>这单还欠不欠工序</strong>&quot;</li>
+</ul>
+<p>两句话长得像，问的却是两件事。一个是&quot;还有下一位客人吗&quot;，一个是&quot;这位客人的菜齐了吗&quot;。混在一起想，后面全乱。</p>
+<p><strong>三层循环问的是同一句话，只是粒度一层比一层细：还有活吗。</strong></p>
+<h2>换成 CI 流水线</h2>
+<p>同一个结构，换身衣服。</p>
+<p>一条流水线跑完一个 commit，里面可能有 build、test、deploy 若干个 job。跑完 build，流水线回头问&quot;后面还有 job 吗&quot;；有就继续，没有就结束这一轮。</p>
+<p>而单个 job 内部如果拉依赖失败了，会重试三次。这是第三层，问的是&quot;<strong>这次尝试成功了吗</strong>&quot;。</p>
+<p>三层，问的都是一件事：还欠不欠。只是粒度一层比一层细。</p>
+<h2>DSH 里就是这三层</h2>
+<p>打开 <code>packages/core/agent-loop/src/agent.ts</code>，找这三个 <code>while</code>：</p>
+<figure class="code"><figcaption>ts</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#758575DD">// agent.ts:252 —— 还有没有用户的活</span></span>
+<span class="line"><span style="color:#4D9375">while</span><span style="color:#666666"> (</span><span style="color:#4D9375">await</span><span style="color:#C99076"> this</span><span style="color:#666666">.</span><span style="color:#80A665">turn</span><span style="color:#666666">())</span><span style="color:#666666"> {}</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#758575DD">// agent.ts:313 —— 这一轮还欠不欠模型一次请求</span></span>
+<span class="line"><span style="color:#4D9375">while</span><span style="color:#666666"> (</span><span style="color:#4D9375">true</span><span style="color:#666666">)</span><span style="color:#666666"> {</span><span style="color:#758575DD"> /* ... step ... */</span><span style="color:#666666"> }</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#758575DD">// agent.ts:407 —— 这次请求成功了吗</span></span>
+<span class="line"><span style="color:#4D9375">while</span><span style="color:#666666"> (</span><span style="color:#4D9375">true</span><span style="color:#666666">)</span><span style="color:#666666"> {</span><span style="color:#758575DD"> /* ... prepareRequest + stream ... */</span><span style="color:#666666"> }</span></span></code></pre></figure><p>写出来不到 30 行。</p>
+<p>现在看 <code>code/step1.mjs</code>。它把最外面那层单独拎出来了：</p>
+<figure class="code"><figcaption>js</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#CB7676">async</span><span style="color:#CB7676"> function</span><span style="color:#80A665"> kick</span><span style="color:#666666">()</span><span style="color:#666666"> {</span></span>
+<span class="line"><span style="color:#4D9375">  while</span><span style="color:#666666"> (</span><span style="color:#4D9375">await</span><span style="color:#80A665"> turn</span><span style="color:#666666">())</span><span style="color:#666666"> {</span><span style="color:#666666"> }</span></span>
+<span class="line"><span style="color:#BD976A">  console</span><span style="color:#666666">.</span><span style="color:#80A665">log</span><span style="color:#666666">(</span><span style="color:#C98A7D77">'</span><span style="color:#C98A7D">· 驱动器归位 idle</span><span style="color:#C98A7D77">'</span><span style="color:#666666">)</span></span>
+<span class="line"><span style="color:#666666">}</span></span></code></pre></figure><figure class="code"><figcaption>sh</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#80A665">node</span><span style="color:#C98A7D"> code/step1.mjs</span></span></code></pre></figure><figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>turn/start {turn:1}</span></span>
+<span class="line"><span>turn/end</span></span>
+<span class="line"><span>turn/start {turn:2}</span></span>
+<span class="line"><span>turn/end</span></span>
+<span class="line"><span>turn/start {turn:3}</span></span>
+<span class="line"><span>turn/end</span></span>
+<span class="line"><span>· 驱动器归位 idle</span></span></code></pre></figure><p>这里唯一需要理解的是 <code>turn()</code> 的<strong>返回值</strong>。它返回 <code>true</code>，说明队列里还有活，<code>while</code> 就再转一圈；返回 <code>false</code>，循环结束。</p>
+<p>所以这一层的出口条件，就是&quot;队列空了&quot;。</p>
+<h2>第二层：这一轮还欠不欠</h2>
+<p><code>code/step2.mjs</code> 在 <code>turn()</code> 里面嵌了第二个 <code>while</code>。</p>
+<figure class="code"><figcaption>sh</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#80A665">node</span><span style="color:#C98A7D"> code/step2.mjs</span></span></code></pre></figure><figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>turn/start {turn:1}</span></span>
+<span class="line"><span>  step/start {turn:1, step:1}</span></span>
+<span class="line"><span>  step/end  → 模型返回 null（还欠一次请求）</span></span>
+<span class="line"><span>  step/start {turn:1, step:2}</span></span>
+<span class="line"><span>  step/end  → 模型返回 null（还欠一次请求）</span></span>
+<span class="line"><span>  step/start {turn:1, step:3}</span></span>
+<span class="line"><span>  step/end  → 模型返回 'completed'</span></span>
+<span class="line"><span>turn/end</span></span></code></pre></figure><p>盯着 <code>turn:1</code> 看。它一直是 1，但 <code>step</code> 从 1 走到了 3。</p>
+<p>这就是&quot;一个轮次里有多个步骤&quot;。</p>
+<p>第二层的出口条件藏在一个返回值里。<code>step()</code> 返回 <code>null</code> 表示&quot;还欠一次请求&quot;，返回 <code>&#39;completed&#39;</code> 表示&quot;这一轮可以收尾了&quot;。</p>
+<p><code>null</code> 这个词很容易被当成&quot;失败&quot;或者&quot;没数据&quot;。它在这里的意思恰恰相反——<strong>是&quot;还没完&quot;</strong>。</p>
+<p>真实代码里它是这样写的（<code>agent.ts:538</code>）：</p>
+<figure class="code"><figcaption>ts</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#4D9375">return</span><span style="color:#BD976A"> concluded</span><span style="color:#CB7676"> ?</span><span style="color:#666666"> { </span><span style="color:#B8A965">kind</span><span style="color:#666666">: </span><span style="color:#C98A7D77">'</span><span style="color:#C98A7D">completed</span><span style="color:#C98A7D77">'</span><span style="color:#666666"> }</span><span style="color:#CB7676"> :</span><span style="color:#CB7676"> null</span></span></code></pre></figure><h2>为什么判断不能写在循环头上</h2>
+<p><code>step2.mjs</code> 里的内层循环长这样：</p>
+<figure class="code"><figcaption>js</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#4D9375">while</span><span style="color:#666666"> (</span><span style="color:#4D9375">true</span><span style="color:#666666">)</span><span style="color:#666666"> {</span></span>
+<span class="line"><span style="color:#CB7676">  const</span><span style="color:#BD976A"> decision</span><span style="color:#666666"> =</span><span style="color:#4D9375"> await</span><span style="color:#80A665"> step</span><span style="color:#666666">(...)</span><span style="color:#758575DD">   // 先做事</span></span>
+<span class="line"><span style="color:#4D9375">  if</span><span style="color:#666666"> (</span><span style="color:#BD976A">turnEnds</span><span style="color:#666666">)</span><span style="color:#4D9375"> break</span><span style="color:#758575DD">                // 再根据结果决定走不走</span></span>
+<span class="line"><span style="color:#666666">}</span></span></code></pre></figure><p>条件写成了 <code>true</code>，出口在中间。这不是偷懒。</p>
+<p>因为&quot;要不要继续&quot;这个答案，<strong>只有跑完一次 <code>step()</code> 才知道</strong>。你没法在循环开始之前就算出来——那正是模型要回答的问题。</p>
+<p>真实代码在 <code>agent.ts:359-363</code> 多了一层判断：</p>
+<figure class="code"><figcaption>ts</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#4D9375">if</span><span style="color:#666666"> (</span><span style="color:#BD976A">turnEnds</span><span style="color:#CB7676"> &#x26;&#x26;</span><span style="color:#C99076"> this</span><span style="color:#666666">.</span><span style="color:#BD976A">inbox</span><span style="color:#666666">.</span><span style="color:#BD976A">nextStep</span><span style="color:#666666">.</span><span style="color:#B8A965">length</span><span style="color:#CB7676"> ===</span><span style="color:#4C9A91"> 0</span><span style="color:#666666">)</span><span style="color:#666666"> {</span></span>
+<span class="line"><span style="color:#4D9375">  await</span><span style="color:#C99076"> this</span><span style="color:#666666">.</span><span style="color:#BD976A">dispatch</span><span style="color:#666666">.</span><span style="color:#80A665">serial</span><span style="color:#666666">(</span><span style="color:#C98A7D77">'</span><span style="color:#C98A7D">agent/turn-stopping</span><span style="color:#C98A7D77">'</span><span style="color:#666666">,</span><span style="color:#666666"> { </span><span style="color:#BD976A">turn</span><span style="color:#666666">, </span><span style="color:#BD976A">signal</span><span style="color:#666666"> })</span></span>
+<span class="line"><span style="color:#666666">}</span></span>
+<span class="line"><span style="color:#4D9375">if</span><span style="color:#666666"> (</span><span style="color:#BD976A">turnEnds</span><span style="color:#CB7676"> &#x26;&#x26;</span><span style="color:#C99076"> this</span><span style="color:#666666">.</span><span style="color:#BD976A">inbox</span><span style="color:#666666">.</span><span style="color:#BD976A">nextStep</span><span style="color:#666666">.</span><span style="color:#B8A965">length</span><span style="color:#CB7676"> ===</span><span style="color:#4C9A91"> 0</span><span style="color:#666666">)</span><span style="color:#4D9375"> break</span></span></code></pre></figure><p><strong>两个条件都满足</strong>才跳出：模型说可以收尾了，<strong>并且</strong>没有下一步要用的输入了。只满足前一个，就还得再走一个 step。</p>
+<p>第二个条件为什么存在，是下一章的事。</p>
+<hr>
+<p>下次再看到一段停不下来的循环，你的第一个问题会变成——它在等什么。</p>
+
+</section>
+
+<section id="ch2" class="chapter">
+  <div class="chapter-head">
+    <span class="chapter-index">02</span>
+    <h2>两条队列</h2>
+  </div>
+  <blockquote>
+<p><strong>代码</strong>：<code>code/step3.mjs</code> <code>code/step3b-scenarios.mjs</code> <code>code/step3c-steer-admission.mjs</code><br><strong>对照</strong>：<code>packages/core/agent-loop/src/inbox.ts</code>、<code>agent.ts:163-173</code>、<code>packages/api/session-controller/src/commands.ts:364-365,477-478</code></p>
+</blockquote>
+<h2>一个我信了很久的误解</h2>
+<p>&quot;消息队列嘛，先进先出。&quot;</p>
+<p>第一次在 DSH 里看到 <code>next-turn</code> 和 <code>next-step</code> 两个队列时，我以为是把同一个东西拆成了两份。</p>
+<p>这个判断是错的。它们装的是<strong>两种完全不同的活</strong>，而这个区分决定了三件看起来很怪的事：为什么用户连发三条消息不会一次全喂给模型、为什么&quot;插话&quot;和&quot;发消息&quot;是两个入口、为什么空闲的时候不能插话。</p>
+<p><strong>队列的数量不是设计出来的，是被消费规则逼出来的。</strong></p>
+<h2>一条队列只能有一个消费规则</h2>
+<p>场景：用户发了一条&quot;这个项目用什么测试框架？&quot;，模型说&quot;我要 grep 一下&quot;，于是有了工具结果。</p>
+<p>这个工具结果不是用户发的新消息，但它同样是要处理的东西。塞进同一条队列会出什么问题？</p>
+<p>问题在于<strong>这两类东西的消费规则恰好相反</strong>：</p>
+<p>用户的新消息，<strong>一次只能取一条</strong>。三条一起问模型，模型就分不清该回哪一条。</p>
+<p>当前这一轮的中间产物，<strong>一次要全取</strong>。工具结果、运行时上下文，本来就是这一步要用的配料，留到下一轮就过期了。</p>
+<p>规则相反，就不能共用一条队列。</p>
+<h2>两条规则</h2>
+<p><code>code/step3.mjs</code> 里的 <code>claim</code> 就是这两条规则：</p>
+<figure class="code"><figcaption>js</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#80A665">claim</span><span style="color:#666666">(</span><span style="color:#BD976A">target</span><span style="color:#666666">)</span><span style="color:#666666"> {</span></span>
+<span class="line"><span style="color:#CB7676">  const</span><span style="color:#BD976A"> stepInput</span><span style="color:#666666"> =</span><span style="color:#C99076"> this</span><span style="color:#666666">.</span><span style="color:#BD976A">nextStep</span><span style="color:#666666">.</span><span style="color:#80A665">splice</span><span style="color:#666666">(</span><span style="color:#4C9A91">0</span><span style="color:#666666">,</span><span style="color:#C99076"> this</span><span style="color:#666666">.</span><span style="color:#BD976A">nextStep</span><span style="color:#666666">.</span><span style="color:#B8A965">length</span><span style="color:#666666">)</span><span style="color:#758575DD">  // 全取</span></span>
+<span class="line"><span style="color:#4D9375">  if</span><span style="color:#666666"> (</span><span style="color:#BD976A">target</span><span style="color:#CB7676"> !==</span><span style="color:#C98A7D77"> '</span><span style="color:#C98A7D">next-turn</span><span style="color:#C98A7D77">'</span><span style="color:#666666">)</span><span style="color:#4D9375"> return</span><span style="color:#BD976A"> stepInput</span></span>
+<span class="line"><span style="color:#4D9375">  return</span><span style="color:#666666"> [...</span><span style="color:#C99076">this</span><span style="color:#666666">.</span><span style="color:#BD976A">nextTurn</span><span style="color:#666666">.</span><span style="color:#80A665">splice</span><span style="color:#666666">(</span><span style="color:#4C9A91">0</span><span style="color:#666666">,</span><span style="color:#4C9A91"> 1</span><span style="color:#666666">),</span><span style="color:#666666"> ...</span><span style="color:#BD976A">stepInput</span><span style="color:#666666">]</span><span style="color:#758575DD">             // 只取一条</span></span>
+<span class="line"><span style="color:#666666">}</span></span></code></pre></figure><figure class="code"><figcaption>sh</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#80A665">node</span><span style="color:#C98A7D"> code/step3.mjs</span></span></code></pre></figure><figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>turn/start {turn:1}</span></span>
+<span class="line"><span>  pre-step claim(next-turn) → 1 条输入</span></span>
+<span class="line"><span>  step/start {turn:1, step:1}</span></span>
+<span class="line"><span>    输入: 这个项目用什么测试框架？</span></span>
+<span class="line"><span>    模型调用 #1 → 要查资料，先调工具</span></span>
+<span class="line"><span>  step/end</span></span>
+<span class="line"><span>  pre-step claim(next-step) → 1 条输入</span></span>
+<span class="line"><span>  step/start {turn:1, step:2}</span></span>
+<span class="line"><span>    输入: 工具结果：测试框架 = node:test + vitest</span></span></code></pre></figure><p>看 <code>claim</code> 后面的参数：第一次是 <code>next-turn</code>，第二次变成了 <code>next-step</code>。</p>
+<p>这不是谁传进去的，是循环自己换的——<strong>轮次的第一个步骤在轮次边界取输入，之后只取当前这一轮的</strong>。</p>
+<h2>落点决定一切</h2>
+<p><code>followup</code>、<code>steer</code>、<code>inject</code> 三个入口，代码上只差一个参数：</p>
+<table>
+<thead>
+<tr>
+<th>入口</th>
+<th>落到哪</th>
+<th>唤醒吗</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>followup</code></td>
+<td>next-turn</td>
+<td>唤醒</td>
+</tr>
+<tr>
+<td><code>steer</code></td>
+<td>next-step</td>
+<td>唤醒</td>
+</tr>
+<tr>
+<td><code>inject</code></td>
+<td>next-step</td>
+<td>不唤醒</td>
+</tr>
+</tbody></table>
+<p>落到 <code>next-turn</code> 就开新的一轮；落到 <code>next-step</code> 就只影响当前这一轮的下一个步骤。</p>
+<p><code>code/step3b-scenarios.mjs</code> 把两种落点摆在一起：</p>
+<figure class="code"><figcaption>sh</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#80A665">node</span><span style="color:#C98A7D"> code/step3b-scenarios.mjs</span></span></code></pre></figure><p>用户连发两条：</p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>  turn/start {turn:1}</span></span>
+<span class="line"><span>    pre-step claim(next-turn) → 1 条输入      ← 只领一条</span></span>
+<span class="line"><span>  turn/end</span></span>
+<span class="line"><span>  turn/start {turn:2}                          ← kick 又转了一圈</span></span>
+<span class="line"><span>    pre-step claim(next-turn) → 1 条输入      ← 第二条</span></span></code></pre></figure><p>用户插话：</p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>  turn/start {turn:1}</span></span>
+<span class="line"><span>    step/start {turn:1, step:1}</span></span>
+<span class="line"><span>      [用户] 只看 packages/core 下的 → 落进 next-step</span></span>
+<span class="line"><span>    pre-step claim(next-step) → 2 条输入</span></span>
+<span class="line"><span>    step/start {turn:1, step:2}</span></span>
+<span class="line"><span>  turn/end                                     ← 还是一个 turn</span></span></code></pre></figure><p>同样是用户的一次动作，落点不同，结果差一整轮。</p>
+<h2>为什么空闲时不能插话</h2>
+<p><code>code/step3c-steer-admission.mjs</code> 补上最后一块：</p>
+<figure class="code"><figcaption>sh</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#80A665">node</span><span style="color:#C98A7D"> code/step3c-steer-admission.mjs</span></span></code></pre></figure><figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>【场景 2 · 空闲时插话】</span></span>
+<span class="line"><span>  此刻 status = idle</span></span>
+<span class="line"><span>  ❌ 被拒绝：session/steer-unavailable: current turn no longer accepts steering</span></span></code></pre></figure><p><code>steer</code> 承诺的是&quot;插进<strong>当前这一步</strong>&quot;。如果没有正在跑的轮次，就没有&quot;当前这一步&quot;可插——承诺兑现不了，所以直接拒绝。</p>
+<p><code>inject</code> 不一样。它不承诺插进哪一轮，只是把东西放进队列等人来取。所以它不校验，也不唤醒。</p>
+<p>输出里还有一段，正好验证了上一节的规则：</p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>  turn/start {turn:1}</span></span>
+<span class="line"><span>    pre-step claim(next-turn) → 2 条输入</span></span>
+<span class="line"><span>      输入: 继续</span></span>
+<span class="line"><span>      输入: 后台上下文：当前工作区是 deepseek-harness</span></span></code></pre></figure><p>注入的那条躺在 <code>next-step</code> 里没人叫醒它。等有人 <code>followup</code> 时，轮次边界的 <code>claim</code> 顺手把它一起取走了——<strong>next-step 全取，next-turn 一条</strong>。</p>
+<h2>它不在内存里</h2>
+<p>队列是持久的。</p>
+<p>每次增删都会写一条 <code>agent/inbox/spliced</code> 事件，队列状态从这些事件投影出来。所以进程重启之后，还没处理的排队消息还在。</p>
+<p>这也是 <code>claim</code> 要接受一个 <code>turn</code> 参数的原因：重放的时候，得能还原&quot;这条消息属于哪一轮&quot;。</p>
+<hr>
+<p>下次再看到两个队列、三个入口，你不会再问&quot;为什么要这么多&quot;，而是先问一句：它们的消费规则差在哪。</p>
+
+</section>
+
+<section id="ch3" class="chapter">
+  <div class="chapter-head">
+    <span class="chapter-index">03</span>
+    <h2>一个字的三条路</h2>
+  </div>
+  <blockquote>
+<p><strong>代码</strong>：<code>code/step4-stream.mjs</code><br><strong>对照</strong>：<code>packages/core/agent-loop/src/assistant-stream.ts:60-71</code>、<code>agent.ts:436-528</code>、<code>packages/llm/llm/src/types.ts:452</code></p>
+</blockquote>
+<h2>我以为流式只是为了&quot;快&quot;</h2>
+<p>看到 <code>for await (const chunk of stream)</code> 的时候，我的第一反应是：这是为了让用户早点看到字。SSE 嘛，打字机效果。</p>
+<p>这个理解只对了三分之一。</p>
+<p>同一个 chunk，在这套系统里有<strong>三个消费者</strong>，而它们的要求互相冲突。只按&quot;让用户早点看到&quot;来设计，另外两个会出问题。</p>
+<p><strong>同一个字，要同时满足三个互相冲突的要求。</strong></p>
+<h2>三个人，三种要求</h2>
+<p><strong>界面</strong>要的是立刻。晚一百毫秒，用户就觉得卡。它不关心完整不完整，来一片显示一片。</p>
+<p><strong>会话日志</strong>要的是完整准确。少一片，回放的时候就缺一块。它不着急，可以等流结束再落盘。</p>
+<p><strong>模型历史</strong>要的是干净。下一轮请求里要的是&quot;模型上次回答了什么&quot;，不是七个碎片。</p>
+<p>三份需求，一个数据源。</p>
+<p><code>Attempt.push()</code> 里那三行，就是分别写给这三个人的：</p>
+<figure class="code"><figcaption>js</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#80A665">push</span><span style="color:#666666">(</span><span style="color:#BD976A">chunk</span><span style="color:#666666">)</span><span style="color:#666666"> {</span></span>
+<span class="line"><span style="color:#C99076">  this</span><span style="color:#666666">.</span><span style="color:#BD976A">record</span><span style="color:#666666">.</span><span style="color:#80A665">push</span><span style="color:#666666">({</span><span style="color:#B8A965"> time</span><span style="color:#666666">:</span><span style="color:#BD976A"> Date</span><span style="color:#666666">.</span><span style="color:#80A665">now</span><span style="color:#666666">(),</span><span style="color:#BD976A"> chunk</span><span style="color:#666666"> })</span><span style="color:#758575DD">                  // ① 录制，给日志</span></span>
+<span class="line"><span style="color:#4D9375">  if</span><span style="color:#666666"> (</span><span style="color:#BD976A">chunk</span><span style="color:#666666">.</span><span style="color:#BD976A">type</span><span style="color:#CB7676"> ===</span><span style="color:#C98A7D77"> '</span><span style="color:#C98A7D">text-delta</span><span style="color:#C98A7D77">'</span><span style="color:#666666">)</span><span style="color:#C99076"> this</span><span style="color:#666666">.</span><span style="color:#BD976A">buffer</span><span style="color:#CB7676"> +=</span><span style="color:#BD976A"> chunk</span><span style="color:#666666">.</span><span style="color:#BD976A">text</span><span style="color:#758575DD">     // ② 折叠，给模型历史</span></span>
+<span class="line"><span style="color:#4D9375">  if</span><span style="color:#666666"> (</span><span style="color:#BD976A">chunk</span><span style="color:#666666">.</span><span style="color:#BD976A">type</span><span style="color:#CB7676"> ===</span><span style="color:#C98A7D77"> '</span><span style="color:#C98A7D">block-end</span><span style="color:#C98A7D77">'</span><span style="color:#666666">)</span><span style="color:#C99076"> this</span><span style="color:#666666">.</span><span style="color:#BD976A">blocks</span><span style="color:#666666">.</span><span style="color:#80A665">push</span><span style="color:#666666">(</span><span style="color:#BD976A">chunk</span><span style="color:#666666">.</span><span style="color:#BD976A">block</span><span style="color:#666666">)</span></span>
+<span class="line"><span style="color:#C99076">  this</span><span style="color:#666666">.</span><span style="color:#80A665">emit</span><span style="color:#666666">({</span><span style="color:#B8A965"> type</span><span style="color:#666666">:</span><span style="color:#C98A7D77"> '</span><span style="color:#C98A7D">chunk</span><span style="color:#C98A7D77">'</span><span style="color:#666666">,</span><span style="color:#BD976A"> chunk</span><span style="color:#666666"> })</span><span style="color:#758575DD">                            // ③ 实时帧，给界面</span></span>
+<span class="line"><span style="color:#666666">}</span></span></code></pre></figure><figure class="code"><figcaption>sh</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#80A665">node</span><span style="color:#C98A7D"> code/step4-stream.mjs</span></span></code></pre></figure><figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>      ⚡ ③ 实时帧 text-delta "这个"</span></span>
+<span class="line"><span>      ⚡ ③ 实时帧 text-delta "项目"</span></span>
+<span class="line"><span>      ⚡ ③ 实时帧 text-delta "用的是"</span></span>
+<span class="line"><span>      ⚡ ③ 实时帧 text-delta " node:test"</span></span>
+<span class="line"><span>      ⚡ ③ 实时帧 block-end</span></span>
+<span class="line"><span>      ⚡ ③ 实时帧 end (assistant/message, seq=2)</span></span>
+<span class="line"><span>    ② 折叠成完整消息: "这个项目用的是 node:test"</span></span>
+<span class="line"><span>    ① 录像 7 片（永久，可回放）</span></span></code></pre></figure><p>前面那一串 <code>⚡</code> 是一路闪过去给界面看的。底下两行才是留下来的东西：一句完整的话，和一份 7 片的原始录像。</p>
+<h2>为什么录像不能省</h2>
+<p>既然已经折叠成完整消息了，为什么还要留那 7 片？日志不是越干净越好吗？</p>
+<p>因为&quot;完整消息&quot;是<strong>加工过的</strong>。加工就会丢信息。</p>
+<p>具体的例子：模型输出到一半被取消，或者流断在半路。这时候&quot;完整消息&quot;根本不存在——你不能拿一个不存在的加工结果去解释发生了什么。但你手里有录像，就能还原它当时到底吐了哪几个字。</p>
+<p>真实系统里这份录像挂在 <code>assistant/message</code> 事件上（<code>agent.ts:527</code> 的 <code>stream: live.stream</code>）。它不是独立事件，是消息自己的附件。所以既不膨胀日志，也不丢证据。</p>
+<h2>惰性那个坑</h2>
+<p>第一次跑会看到一件怪事：</p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>      ⚡ ③ 实时帧 start</span></span>
+<span class="line"><span>    发给模型: 这个项目用什么测试框架？</span></span>
+<span class="line"><span>      ⚡ ③ 实时帧 block-start</span></span></code></pre></figure><p>&quot;发给模型&quot;出现在 <code>start</code> 之后，看着像顺序错了。</p>
+<p>其实没错。<code>mockModelStream()</code> 是个 async generator，<strong>调用它不会执行任何代码</strong>，直到第一次 <code>next()</code> 才开始跑。而代码是先发 <code>start</code> 帧，再开始消费流。</p>
+<p>真实代码也是这个顺序（<code>agent.ts:438-440</code>）。所以这是忠实的，不是 bug。</p>
+<h2>生成和验证</h2>
+<p>这里有个值得记下的规律：<strong>生成一件东西，比验证一件东西容易得多。</strong></p>
+<p>写下 <code>push()</code> 存住每一片，是生成。但它对不对，不靠&quot;我写得挺仔细&quot;来保证，靠的是&quot;把日志读出来重放一遍，看是不是和当初一样&quot;。</p>
+<p>那 7 片录像存在的意义，就是让&quot;验证&quot;这件事成为可能。</p>
+<hr>
+<p>以后再看到任何流式输出，你的第一反应会是：这一小片，它同时给了谁。</p>
+
+</section>
+
+<section id="ch4" class="chapter">
+  <div class="chapter-head">
+    <span class="chapter-index">04</span>
+    <h2>重试不是新步骤</h2>
+  </div>
+  <blockquote>
+<p><strong>代码</strong>：<code>code/step5-retry.mjs</code><br><strong>对照</strong>：<code>agent.ts:407</code>（attempt 循环）、<code>agent.ts:494-509</code>（失败后问监听器）、<code>packages/llm/llm/src/index.ts:1146</code>（错误变 chunk）</p>
+</blockquote>
+<h2>我以为 <code>request-error</code> 是错误处理</h2>
+<p>源码里有个事件叫 <code>agent/request-error</code>。看到名字，我的第一反应是：这是出错之后的收尾逻辑。</p>
+<p>不是。它是<strong>重试的入口</strong>。</p>
+<p>这个误会不小，因为它会让人把&quot;重试&quot;和&quot;新一轮&quot;混在一起想。而这两件事在结构上是分开的——分开得很彻底。</p>
+<p><strong>重试复用一切，唯独重发。</strong></p>
+<h2>第三层循环</h2>
+<p><code>code/step5-retry.mjs</code> 在 <code>step()</code> 里面又嵌了一个 <code>while</code>：</p>
+<figure class="code"><figcaption>js</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#BD976A">async</span><span style="color:#80A665"> step</span><span style="color:#666666">()</span><span style="color:#666666"> {</span></span>
+<span class="line"><span style="color:#CB7676">  const</span><span style="color:#BD976A"> request</span><span style="color:#666666"> =</span><span style="color:#666666"> {</span><span style="color:#B8A965"> messages</span><span style="color:#666666">:</span><span style="color:#C99076"> this</span><span style="color:#666666">.</span><span style="color:#80A665">deriveMessages</span><span style="color:#666666">()</span><span style="color:#666666"> }</span><span style="color:#758575DD">   // 组装，只做一次</span></span>
+<span class="line"><span style="color:#CB7676">  let</span><span style="color:#BD976A"> attemptNo</span><span style="color:#666666"> =</span><span style="color:#4C9A91"> 0</span></span>
+<span class="line"><span style="color:#4D9375">  while</span><span style="color:#666666"> (</span><span style="color:#4D9375">true</span><span style="color:#666666">)</span><span style="color:#666666"> {</span><span style="color:#758575DD">                                        // ← 第三层</span></span>
+<span class="line"><span style="color:#BD976A">    attemptNo</span><span style="color:#CB7676"> +=</span><span style="color:#4C9A91"> 1</span></span>
+<span class="line"><span style="color:#758575DD">    /* 发一次请求 */</span></span>
+<span class="line"><span style="color:#4D9375">    if</span><span style="color:#666666"> (</span><span style="color:#BD976A">失败</span><span style="color:#666666">)</span><span style="color:#666666"> {</span></span>
+<span class="line"><span style="color:#4D9375">      if</span><span style="color:#666666"> (</span><span style="color:#BD976A">没人接管</span><span style="color:#666666">)</span><span style="color:#4D9375"> throw</span><span style="color:#CB7676"> new</span><span style="color:#80A665"> Error</span><span style="color:#666666">(...)</span></span>
+<span class="line"><span style="color:#4D9375">      continue</span><span style="color:#758575DD">                                          // 重发</span></span>
+<span class="line"><span style="color:#666666">    }</span></span>
+<span class="line"><span style="color:#758575DD">    /* 成功，收尾 */</span></span>
+<span class="line"><span style="color:#4D9375">    return</span></span>
+<span class="line"><span style="color:#666666">  }</span></span>
+<span class="line"><span style="color:#666666">}</span></span></code></pre></figure><p>跑出来是这样：</p>
+<figure class="code"><figcaption>sh</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#80A665">node</span><span style="color:#C98A7D"> code/step5-retry.mjs</span></span></code></pre></figure><figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>    step/start {turn:1, step:1}</span></span>
+<span class="line"><span>        attempt #1 发出请求: 这个项目用什么测试框架？</span></span>
+<span class="line"><span>      attempt #1 失败：连接中断（TRANSPORT）</span></span>
+<span class="line"><span>      监听器返回 retry → 复用同一份组装，再发一次</span></span>
+<span class="line"><span>        attempt #2 发出请求: 这个项目用什么测试框架？</span></span>
+<span class="line"><span>    step/end</span></span></code></pre></figure><p><strong>两次请求，但 <code>step/start</code> 只出现了一次。</strong></p>
+<p>这就是这一层的全部意义：<code>attempt</code> 循环转多少圈，都算同一个 step。</p>
+<h2>那行&quot;组装&quot;的位置</h2>
+<p>注意 <code>request</code> 是在 <code>while</code> <strong>外面</strong>构造的。</p>
+<p>把它挪进循环里也能跑，输出看不出差别。但语义就错了——那样每次重试都会重新组装一遍请求，而在真实系统里，重试是&quot;把同一份请求再发一次&quot;，不是&quot;重新写一份请求&quot;。</p>
+<p>真实代码里 <code>prepareRequest</code> 和 <code>agent/pre-step</code> 都在 attempt 循环外面（<code>agent.ts:407-408</code>）。所以重试<strong>不会</strong>重跑 pre-step、<strong>不会</strong>重新组装提示词、也<strong>不会</strong>重复追加用户消息。</p>
+<p>最后这点是可以验证的。跑完看日志：</p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>日志里存了什么：</span></span>
+<span class="line"><span>  seq=1  user/message      ← 只有一条</span></span>
+<span class="line"><span>  seq=2  assistant/message</span></span></code></pre></figure><p>发了两次请求，用户消息只记了一次。</p>
+<h2>失败是个 chunk，不是异常</h2>
+<figure class="code"><figcaption>js</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#4D9375">yield</span><span style="color:#666666"> {</span><span style="color:#B8A965"> type</span><span style="color:#666666">:</span><span style="color:#C98A7D77"> '</span><span style="color:#C98A7D">finish</span><span style="color:#C98A7D77">'</span><span style="color:#666666">,</span><span style="color:#B8A965"> reason</span><span style="color:#666666">:</span><span style="color:#666666"> {</span><span style="color:#B8A965"> kind</span><span style="color:#666666">:</span><span style="color:#C98A7D77"> '</span><span style="color:#C98A7D">error</span><span style="color:#C98A7D77">'</span><span style="color:#666666">,</span><span style="color:#B8A965"> failure</span><span style="color:#666666">:</span><span style="color:#666666"> {...}</span><span style="color:#666666"> }</span><span style="color:#666666"> }</span></span></code></pre></figure><p>上一章说过，同一个 chunk 有三个消费者。这里用上了这个设计的好处：<strong>失败也是流的一部分</strong>。</p>
+<p>所以上层不用写两套错误处理——一套管&quot;网络抛异常&quot;，一套管&quot;流里说失败了&quot;。它只看 <code>finish.kind</code>。</p>
+<p>真实代码在 adapter 边界做这个转换（<code>llm/index.ts:1146</code>），一行函数把任何异常变成一个终结 chunk。</p>
+<h2>重试几次，谁说了算</h2>
+<figure class="code"><figcaption>js</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#CB7676">const</span><span style="color:#BD976A"> action</span><span style="color:#666666"> =</span><span style="color:#C99076"> this</span><span style="color:#666666">.</span><span style="color:#80A665">onRequestError</span><span style="color:#666666">?.(</span><span style="color:#BD976A">live</span><span style="color:#666666">.</span><span style="color:#BD976A">finish</span><span style="color:#666666">.</span><span style="color:#BD976A">failure</span><span style="color:#666666">)</span></span>
+<span class="line"><span style="color:#4D9375">if</span><span style="color:#666666"> (</span><span style="color:#BD976A">action</span><span style="color:#666666">?.</span><span style="color:#BD976A">kind</span><span style="color:#CB7676"> !==</span><span style="color:#C98A7D77"> '</span><span style="color:#C98A7D">retry</span><span style="color:#C98A7D77">'</span><span style="color:#666666">)</span><span style="color:#4D9375"> throw</span><span style="color:#CB7676"> new</span><span style="color:#80A665"> Error</span><span style="color:#666666">(...)</span></span></code></pre></figure><p>玩具里是一个回调。真实代码里是一个 <strong>waterfall</strong>（<code>agent.ts:494-504</code>），而且顺带把 <code>retryPolicy</code> 一起传进去。</p>
+<p>这一点值得留意：<strong>重试策略是路由决定的，不是全局写死的。</strong></p>
+<p>换一个模型提供方，重试次数和退避算法可以完全不同。如果写成一个全局常量，换提供方就得改循环代码——而循环代码是不该知道这些的。</p>
+<h2>没人接管会怎样</h2>
+<p><code>code/step5-retry.mjs</code> 的第二个场景就是这种情况：</p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>  turn/start {turn:1}</span></span>
+<span class="line"><span>    step/start {turn:1, step:1}</span></span>
+<span class="line"><span>      attempt #1 失败：连接中断（TRANSPORT）</span></span>
+<span class="line"><span>    这一轮以 error 结束：请求失败且无人重试：连接中断</span></span>
+<span class="line"><span>  turn/end {reason:'error'}</span></span></code></pre></figure><p>抛出去，这一轮以 <code>error</code> 收尾。<code>turn/end</code> 的 reason 会把这件事记下来。</p>
+<p>到这里三层循环就齐了：<code>kick</code> 管轮次，<code>turn</code> 管步骤，<code>step</code> 管重发。重试只影响最里面那一层，外面两层完全不知道发生过。</p>
+<hr>
+<p>以后再看到 <code>retry</code>，你要问的不再是&quot;重试几次&quot;，而是&quot;重试的时候，哪些东西是不重新算的&quot;。</p>
+
+</section>
+
+<section id="ch5" class="chapter">
+  <div class="chapter-head">
+    <span class="chapter-index">05</span>
+    <h2>停下来之后</h2>
+  </div>
+  <blockquote>
+<p><strong>代码</strong>：<code>code/step6-cancel.mjs</code><br><strong>对照</strong>：<code>agent.ts:175-181</code>（cancel 实现）、<code>:440-443</code>（检查点）、<code>:448-477</code>（两种收尾）、<code>:366-371</code>（拷贝原因）</p>
+</blockquote>
+<h2>&quot;取消不就是停止吗&quot;</h2>
+<p>模型正在吐字，用户点了停止按钮。</p>
+<p>我以为这件事的难点在&quot;怎么停下来&quot;——大概是给流发个信号，然后它就不吐了。</p>
+<p>停下来确实不难。难的是<strong>停下来之后</strong>。</p>
+<p>屏幕上已经有半句话了。日志里要不要记？如果不记，用户重新打开这个会话，会发现自己刚才明明看到了内容，现在却什么都没有。</p>
+<p><strong>取消的难点从来不是停下来，是停下来之后留下了什么痕迹。</strong></p>
+<h2>两种停止，两种收尾</h2>
+<p><code>code/step6-cancel.mjs</code> 跑了两个场景，差别只在一个时间点。</p>
+<figure class="code"><figcaption>sh</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#80A665">node</span><span style="color:#C98A7D"> code/step6-cancel.mjs</span></span></code></pre></figure><p><strong>吐到一半才停：</strong></p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>      ⚡ ③ text-delta "这个"</span></span>
+<span class="line"><span>      ⚡ ③ text-delta "项目"</span></span>
+<span class="line"><span>      [用户点了停止]</span></span>
+<span class="line"><span>      ⚡ 保留已交付的 "这个项目"（interrupted: true）</span></span>
+<span class="line"><span>  turn/end {reason:'aborted'}</span></span>
+<span class="line"><span></span></span>
+<span class="line"><span>模型历史（下一轮会看到的内容）：</span></span>
+<span class="line"><span>  user: 这个项目用什么测试框架？</span></span>
+<span class="line"><span>  assistant: 这个项目  (被中断)</span></span></code></pre></figure><p><strong>一个字都没吐就停：</strong></p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>      ⚡ 没有任何内容交付 → 只记 assistant/attempt（不进模型历史）</span></span>
+<span class="line"><span>  turn/end {reason:'aborted'}</span></span>
+<span class="line"><span></span></span>
+<span class="line"><span>模型历史：</span></span>
+<span class="line"><span>  user: 这个项目用什么测试框架？</span></span></code></pre></figure><p>同样是取消，结果完全不同。</p>
+<table>
+<thead>
+<tr>
+<th>停止时机</th>
+<th>记什么</th>
+<th>进模型历史吗</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>已经吐了内容</td>
+<td><code>assistant/message</code> + <code>interrupted: true</code></td>
+<td>进</td>
+</tr>
+<tr>
+<td>一个字都没吐</td>
+<td><code>assistant/attempt</code></td>
+<td>不进</td>
+</tr>
+</tbody></table>
+<h2>为什么必须分开</h2>
+<p><strong>已经吐了内容的情况</strong>：用户屏幕上看到了。日志里不记，重放的时候这半句话就消失了——用户会觉得消息丢了一截。而且下一轮请求里模型也不知道自己刚才说过什么，可能把同样的话再说一遍。</p>
+<p><strong>一个字都没吐的情况</strong>：往模型历史里塞一条空消息，纯属污染上下文。所以只留一条&quot;仅日志&quot;的事件，证明&quot;这里尝试过、但没产出&quot;。</p>
+<p>真实代码里这是 <code>agent.ts:448-477</code> 的那两个分支。</p>
+<p>这里有个让人安心的地方：这两个分支<strong>不是为取消专门写的</strong>。<code>assistant/attempt</code> 一直是那个&quot;只进日志、不进模型历史&quot;的事件——上一章里重试失败用的是它，这里取消用的还是它。新场景，旧机制。</p>
+<h2>取消什么时候生效</h2>
+<figure class="code"><figcaption>js</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#4D9375">for</span><span style="color:#4D9375"> await</span><span style="color:#666666"> (</span><span style="color:#CB7676">const</span><span style="color:#BD976A"> chunk</span><span style="color:#CB7676"> of</span><span style="color:#80A665"> slowModelStream</span><span style="color:#666666">(</span><span style="color:#BD976A">signal</span><span style="color:#666666">))</span><span style="color:#666666"> {</span></span>
+<span class="line"><span style="color:#4D9375">  if</span><span style="color:#666666"> (</span><span style="color:#BD976A">signal</span><span style="color:#666666">.</span><span style="color:#BD976A">aborted</span><span style="color:#666666">)</span><span style="color:#4D9375"> throw</span><span style="color:#BD976A"> signal</span><span style="color:#666666">.</span><span style="color:#BD976A">reason</span><span style="color:#758575DD">   // 每一块之前检查</span></span>
+<span class="line"><span style="color:#BD976A">  live</span><span style="color:#666666">.</span><span style="color:#80A665">push</span><span style="color:#666666">(</span><span style="color:#BD976A">chunk</span><span style="color:#666666">)</span></span>
+<span class="line"><span style="color:#666666">}</span></span></code></pre></figure><p>对应 <code>agent.ts:440-443</code> 的 <code>signal.throwIfAborted()</code>。</p>
+<p>注意检查点在<strong>每一块之前</strong>。所以取消的粒度是&quot;一块 chunk&quot;，不是&quot;立刻&quot;。</p>
+<p>如果模型正在长时间思考、一个字都还没吐，取消要等到下一块到达才生效。真实系统里这种&quot;卡住不动&quot;的情况由 adapter 的 idle 超时兜底——下一章会碰到它。</p>
+<p>这个设计是有意的：取消是<strong>协作式</strong>的。每个可能耗时的环节自己检查信号，而不是从外面强行打断。因为强行打断会留下半死不活的状态——一半的写操作做完了，另一半没做。</p>
+<h2>一个不会注意到的细节</h2>
+<p>真实代码在写 <code>turn/end</code> 的取消原因时，会先<strong>拷贝一份</strong>（<code>agent.ts:366-371</code>）。</p>
+<p>原因很具体：<code>AbortSignal.reason</code> 就是调用方传进来的那个对象。而 Node 的 <code>fetch</code> 会往上挂一个 <code>stack</code> 属性。如果不拷贝直接写进日志，<strong>调用栈就被写进会话文件了</strong>——体积变大，而且对用户毫无意义。</p>
+<p>拷贝一份，既挡住了这个，又保持了结束事件可以安全追加。</p>
+<p>这种细节不会出现在任何架构图里。它只在有人真的把日志打开看过之后才会被发现。</p>
+<hr>
+<p>以后再设计任何可中断的流程，你会先想一件事：已经交付出去的那部分，存在哪里。</p>
+
+</section>
+
+<section id="ch6" class="chapter">
+  <div class="chapter-head">
+    <span class="chapter-index">06</span>
+    <h2>从字节到消息</h2>
+  </div>
+  <blockquote>
+<p><strong>代码</strong>：<code>code/step7-http-sse.mjs</code><br><strong>对照</strong>：<code>packages/llm/llm-deepseek/src/adapter.ts:120-147</code>、<code>sse.ts:13</code>、<code>translate.ts:104</code></p>
+</blockquote>
+<h2>我以为 stream 就是&quot;服务器一段一段发 JSON&quot;</h2>
+<p>前五章里，chunk 都是本地 <code>yield</code> 出来的。真实的网络长什么样，一直没碰。</p>
+<p>我原以为无非是服务器把 JSON 分几次发过来。实际上中间隔着<strong>两套需要自己写的翻译</strong>。</p>
+<p><code>code/step7-http-sse.mjs</code> 起了一个本地服务器扮演模型，然后用真的 <code>fetch</code> 去请求它：</p>
+<figure class="code"><figcaption>sh</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span style="color:#80A665">node</span><span style="color:#C98A7D"> code/step7-http-sse.mjs</span></span></code></pre></figure><figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>        原始字节的一帧: "event: message_start\ndata: {\"type\":\"message_start\",...}"</span></span>
+<span class="line"><span>          wire ← message_start</span></span>
+<span class="line"><span>          wire ← content_block_start</span></span>
+<span class="line"><span>          ⚡ ③ 实时帧 block-start</span></span>
+<span class="line"><span>          wire ← content_block_delta</span></span>
+<span class="line"><span>          ⚡ ③ 实时帧 text-delta "这个"</span></span>
+<span class="line"><span>          wire ← content_block_delta</span></span>
+<span class="line"><span>          ⚡ ③ 实时帧 text-delta "项目"</span></span>
+<span class="line"><span>          ...</span></span>
+<span class="line"><span>          wire ← message_stop</span></span>
+<span class="line"><span>          ⚡ ③ 实时帧 finish</span></span></code></pre></figure><p>三层，三种词汇。</p>
+<p><strong>翻译不是格式转换，是语义映射。</strong></p>
+<h2>第一层：网络给的是字节，不是事件</h2>
+<p>服务器推过来的东西长这样：</p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>event: content_block_delta</span></span>
+<span class="line"><span>data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"这个"}}</span></span>
+<span class="line"><span></span></span></code></pre></figure><p>就是文本，用<strong>空行</strong>分隔每一帧。</p>
+<p>麻烦的地方在于：TCP 不保证边界。一个网络包里可能塞了<strong>半帧</strong>，也可能塞了<strong>三帧半</strong>。所以不能&quot;收到一次就读一次&quot;，必须自己攒缓冲区、按空行切。</p>
+<p><code>sse.ts</code> 那 26 行存在，全部理由就是这个。</p>
+<h2>第二层：wire 词汇不是你的词汇</h2>
+<p>切出帧之后，你拿到的还是<strong>厂商的词汇</strong>：</p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>content_block_delta / text_delta / message_stop</span></span></code></pre></figure><p>而你自己的系统里说的是：</p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>text-delta / block-end / finish</span></span></code></pre></figure><p>中间必须有人翻译。不翻译也行，但那样每一层代码都得懂每一家厂商的协议——今天接 Anthropic，明天接 OpenAI，循环里就全是 <code>if (provider === ...)</code>。</p>
+<p><code>translate()</code> 那个 <code>switch</code> 就是这道墙。它让上层只认自己那七种 chunk（<code>packages/llm/llm/src/types.ts:452</code>）。</p>
+<h2>第三层：翻译不是一对一</h2>
+<p>看输出，有两行很有意思：</p>
+<figure class="code"><figcaption>text</figcaption><pre class="shiki vitesse-dark" style="background-color:#121212;color:#dbd7caee" tabindex="0"><code><span class="line"><span>          wire ← message_start</span></span>
+<span class="line"><span>          wire ← message_delta</span></span></code></pre></figure><p>它们后面<strong>没有对应的实时帧</strong>。</p>
+<p>它们被 <code>default: break</code> 丢掉了。真实系统里 <code>message_delta</code> 会变成 <code>usage</code>（token 统计），<code>message_start</code> 什么都不产出。</p>
+<p>这件事的意义在于：<strong>翻译不是格式转换，是语义映射</strong>。厂商的协议里有它自己的结构，你的系统只需要其中一部分。硬凑成一对一，最后只会把厂商的结构泄漏到你的每一层里。</p>
+<h2>剩下没写的</h2>
+<p>这个仓库写完了 agent runtime 的主干，但有几块没碰：</p>
+<p>工具调用（模型要求调工具、流式的参数片段、并发调度）、请求头与序列管理、系统提示词的归并、持久化到磁盘。</p>
+<p>它们都不改变那三层循环的结构。工具调用会让 <code>step()</code> 返回 <code>null</code>，请求头管理是给 <code>buildRequest</code> 加约束，持久化是给 <code>append</code> 加一个后端。</p>
+<p>都是出口条件的问题，不是结构的问题。</p>
+<h2>所以现在</h2>
+<p>你打开 <code>agent.ts</code>，第一反应应该不再是&quot;从第一行开始读&quot;。</p>
+<p>而是<strong>先找那三个 <code>while</code></strong>——找到 <code>252</code>、<code>296</code>、<code>398</code>，然后看每一层的出口条件在等什么。</p>
+<p>找到了这个骨架，那 893 行的其余部分就都有了位置。它们不是 893 行逻辑，是三层循环的注脚。</p>
+
+</section></article>
+</main>
+
+<footer>
+  每章配的代码都在 <code>code/</code> 下，单独 <code>node</code> 就能跑，不依赖任何东西。
+</footer>
+
+<script>
+const bar = document.getElementById('bar')
+const links = [...document.querySelectorAll('aside nav a')]
+const sections = links.map(a => document.getElementById(a.dataset.target))
+
+addEventListener('scroll', () => {
+  const h = document.documentElement
+  bar.style.width = (h.scrollTop / (h.scrollHeight - h.clientHeight) * 100) + '%'
+
+  let current = sections[0]
+  for (const s of sections) if (s.getBoundingClientRect().top <= 120) current = s
+  links.forEach(a => a.classList.toggle('active', a.dataset.target === current.id))
+}, { passive: true })
+</script>
+</body>
+</html>
