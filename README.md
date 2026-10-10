@@ -4,6 +4,8 @@ DeepSeek Harness 的 agent runtime 有 893 行。
 
 但它的骨架只有三层 `while`。
 
+> 📖 在线读：<https://webaifei.github.io/dsh-agent-loop-notes/>
+
 这个仓库把那个骨架从零写了一遍——九个文件，每个都能直接跑，输出会打印出和真实代码一样的调用顺序。读完它，你再打开 `agent.ts`，看到的不会是 893 行代码，而是一直在问同一个问题的三层循环，外加一堆出口条件。
 
 ## 那 893 行是怎么来的
@@ -60,3 +62,16 @@ node tools/build-page.mjs
 写完这九个文件之后，你打开 `agent.ts` 的第一反应会变成：**先找那三个 `while`**。
 
 找到了，剩下的 860 行就都有地方可放了。
+
+## 同系列
+
+本仓库是「一个仓库钻一个系统」系列里的一篇。横向对照（三家放在一起看）在
+[multi-agent-architecture-notes](https://github.com/webaifei/multi-agent-architecture-notes)。
+
+| 仓库 | 在线读 | 讲什么 |
+| --- | --- | --- |
+| dsh-agent-loop-notes | [在线](https://webaifei.github.io/dsh-agent-loop-notes/) · [源码](https://github.com/webaifei/dsh-agent-loop-notes) | DeepSeek Harness 的三层 `while`、两条队列、重试为什么不算新步骤 |
+| codex-agent-loop-notes | [在线](https://webaifei.github.io/codex-agent-loop-notes/) · [源码](https://github.com/webaifei/codex-agent-loop-notes) | Codex 的三层 `loop`，加一个叫 `needs_follow_up` 的布尔 |
+| muse-architecture-notes | [在线](https://webaifei.github.io/muse-architecture-notes/) · [源码](https://github.com/webaifei/muse-architecture-notes) | Meta Muse 的权限模型、凭据代理、状态机 |
+| multi-agent-architecture-notes | [在线](https://webaifei.github.io/multi-agent-architecture-notes/) · [源码](https://github.com/webaifei/multi-agent-architecture-notes) | 三家横向对照：13 张架构图 + 可运行实现 |
+| manus-agent-research | [源码](https://github.com/webaifei/manus-agent-research) | Manus 的公开资料整理 |
